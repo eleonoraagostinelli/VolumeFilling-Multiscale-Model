@@ -246,9 +246,10 @@ class MacrophageModel:
             "cell_density": np.sum(U, axis=(1, 2)),
             "volume_fraction": np.sum(U * v, axis=(1, 2)),
             "mean_lipid_load": self.compute_mean_lipid_load_domain(U),
-            "internalised_lipid_volume": self.compute_VL(U)
+            "internalised_lipid_volume": self.compute_VL(U),
         }
         totals["macrophage_number"] = vol_to_number * totals["cell_density"]
+        totals["cell_volume"] = vol_to_number * totals["volume_fraction"]
 
         return {
             "spatial": spatial,

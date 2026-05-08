@@ -1,18 +1,3 @@
-1. Physical Sanity Checks
-
-These checks ensure that the mathematical rules of your biological system are not being violated.
-
-Non-negativity (u≥0): You cannot have negative macrophages. Due to the numerical nature of the BDF solver, 
-values might occasionally dip slightly below zero (e.g., -1e-12) due to floating-point errors, but any significant negative 
-number means the solver took a bad step or the math is fundamentally unstable.
-
-Volume Capacity (0≤ϕ≤1): The extracellular fluid volume fraction ϕ must never drop below 0 (which would mean macrophages are 
-physically overlapping/crushed beyond 100% capacity) and should never exceed 1 (which would mean you have more than 100% empty space).
-
-Mass/Cell Conservation (if applicable): If you set the death rates (β=0, γ=0) and ensure no flux at the boundaries, 
-the total number of macrophages in your system should remain exactly constant over time, even as they move through space 
-and ingest lipid.
-
 2. Numerical Verification Checks
 
 These checks ensure your grid resolution and solver tolerances aren't artificially altering the results.

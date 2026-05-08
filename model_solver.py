@@ -6,7 +6,7 @@ import numpy as np
 import warnings
 from scipy.integrate import solve_ivp
 from scipy.sparse import kron, diags
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 @dataclass
 class Params:
@@ -20,10 +20,14 @@ class Params:
     sigma_b: float
     sigma_max: float
     V_tot: float    
-    delta_v: float  
+    v_max: float
+    delta_v: float = field(init=False) 
     theta: float
     debug: bool = False
     tol: float = 1e-6
+
+    def __post_init__(self):
+        self.delta_v = self.v_max / self.N
 
 class MacrophageModel:
     def __init__(self, p: Params):
@@ -52,9 +56,9 @@ class MacrophageModel:
 
     def compute_VL(self, u: np.ndarray):
         if u.ndim == 3:
-            return (self.p.theta / self.p.M) * np.sum(u * self.n_array, axis=(1, 2))
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(u * self.n_array, axis=(1, 2))
         else:
-            return (self.p.theta / self.p.M) * np.sum(u * self.n_array)
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(u * self.n_array)
 
     def compute_mean_lipid_load_spatial(self, U: np.ndarray) -> np.ndarray:
         """

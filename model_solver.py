@@ -212,7 +212,7 @@ class MacrophageModel:
             t_eval=t_eval,
             method="BDF",
             jac_sparsity=self.jac_sparsity,
-            rtol=1e-6,
+            rtol=self.p.tol,
             atol=1e-9,
         )
         
@@ -253,7 +253,7 @@ class MacrophageModel:
             "internalised_lipid_volume": self.compute_VL(U),
         }
         totals["macrophage_number"] = vol_to_number * totals["cell_density"]
-        totals["cell_volume"] = vol_to_number * totals["volume_fraction"]
+        totals["cell_volume"] = p.V_tot * totals["average_volume_fraction"]
 
         return {
             "spatial": spatial,

@@ -35,6 +35,7 @@ class MacrophageModel:
         # Cache static arrays here to save time during ODE integration
         self.v = 1.0 + np.arange(p.N + 1) * p.delta_v
         self.n_array = np.arange(p.N + 1)
+        self.i_array = np.arange(p.M + 1)
         self.n_decay = 1.0 - self.n_array / p.N
         self.n_growth = self.n_array / p.N
         
@@ -242,18 +243,18 @@ class MacrophageModel:
 
         structure = {
             "cell_density": np.sum(U, axis=1),
-            "volume_fraction": np.sum(U * v, axis=1)
+            "tissue_volume_fraction": np.sum(U * v, axis=1)/self.p.M
         }
         structure["macrophage_number"] = vol_to_number * structure["cell_density"]
 
         totals = {
             "cell_density": np.sum(U, axis=(1, 2)),
-            "average_volume_fraction": np.sum(U * v, axis=(1, 2))/p.M,
+            "tissue_volume_fraction": np.sum(U * v, axis=(1, 2))/p.M,
             "mean_lipid_load": self.compute_mean_lipid_load_domain(U),
             "internalised_lipid_volume": self.compute_VL(U),
         }
         totals["macrophage_number"] = vol_to_number * totals["cell_density"]
-        totals["cell_volume"] = p.V_tot * totals["average_volume_fraction"]
+        totals["cell_volume"] = p.V_tot * totals["tissue_volume_fraction"]
 
         return {
             "spatial": spatial,

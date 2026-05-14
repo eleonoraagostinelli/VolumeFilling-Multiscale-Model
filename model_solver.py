@@ -271,7 +271,7 @@ class MacrophageModel:
         If strict=True, raises a ValueError on physical violations.
         Otherwise, raises a warning.
         """
-        print("--- Running Post-Simulation Sanity Checks ---")
+        # print("--- Running Post-Simulation Sanity Checks ---")
         
         if not np.isfinite(U).all():
             raise ValueError("NUMERICAL EXPLOSION: NaNs or Infs detected in the output matrix!")
@@ -295,5 +295,5 @@ class MacrophageModel:
             if strict: raise ValueError(msg)
             else: warnings.warn(msg)
             
-        print("[\u2713] All physical constraints respected!")
-        print("---------------------------------------------")
+        # print("[\u2713] All physical constraints respected!")
+        # print("---------------------------------------------")

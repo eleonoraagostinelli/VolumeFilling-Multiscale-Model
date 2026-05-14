@@ -221,6 +221,9 @@ class MacrophageModel:
             warnings.warn(f"Solver failed: {sol.message}")
             
         U = sol.y.T.reshape((-1, self.p.M + 1, self.p.N + 1))
+
+        # Run sanity checks on the results
+        self.validate_results(U, strict=False)
         return U, sol
 
     def compute_diagnostics(self, U: np.ndarray) -> dict:

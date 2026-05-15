@@ -234,7 +234,7 @@ class MacrophageModel:
         """
         p = self.p
         v = self.v
-        vol_to_number = p.V_tot / p.M
+        V_site = p.V_tot / p.M
 
         spatial = {
             "cell_density": np.sum(U, axis=2),
@@ -242,21 +242,21 @@ class MacrophageModel:
             "mean_lipid_load": self.compute_mean_lipid_load_spatial(U),
             "phi": self.compute_phi(U)
         }
-        spatial["macrophage_number"] = vol_to_number * spatial["cell_density"]
+        spatial["macrophage_number"] = V_site * spatial["cell_density"]
 
         structure = {
-            "cell_density": np.sum(U, axis=1),
+            "average_cell_density": np.sum(U, axis=1)/self.p.M,
             "tissue_volume_fraction": np.sum(U * v, axis=1)/self.p.M
         }
-        structure["macrophage_number"] = vol_to_number * structure["cell_density"]
+        structure["macrophage_number"] = p.V_tot * structure["average_cell_density"]
 
         totals = {
-            "cell_density": np.sum(U, axis=(1, 2)),
+            "average_cell_density": np.sum(U, axis=(1, 2))/p.M,
             "tissue_volume_fraction": np.sum(U * v, axis=(1, 2))/p.M,
             "mean_lipid_load": self.compute_mean_lipid_load_domain(U),
             "internalised_lipid_volume": self.compute_VL(U),
         }
-        totals["macrophage_number"] = vol_to_number * totals["cell_density"]
+        totals["macrophage_number"] = p.V_tot * totals["average_cell_density"]
         totals["cell_volume"] = p.V_tot * totals["tissue_volume_fraction"]
 
         return {

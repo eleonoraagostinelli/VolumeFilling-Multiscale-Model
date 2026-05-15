@@ -109,8 +109,8 @@ class MacrophageModel:
 
         if M >= 2:
             du[1:M, 0] = (
-                - N * p.kplus * phi[1:M] * u[1:M, 0]
-                + p.kminus * u[1:M, 1] 
+                - N * p.kplus * self.n_decay[0] * phi[1:M] * u[1:M, 0]
+                + p.kminus * self.n_growth[1] * u[1:M, 1]
                 + M**2 * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
                     - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
                 )
@@ -118,8 +118,8 @@ class MacrophageModel:
             )
 
             du[1:M, N] = (
-                p.kplus * phi[1:M] * u[1:M, N-1]
-                - N * p.kminus * u[1:M, N]
+                N * p.kplus * self.n_decay[N-1] * phi[1:M] * u[1:M, N-1]
+                - N * p.kminus * self.n_growth[N] * u[1:M, N]
                 + M**2 * p.D_min * (
                     phi_H[1:M, N] * (u[0:M-1, N] + u[2:M+1, N])
                     - u[1:M, N] * (phi_H[0:M-1, N] + phi_H[2:M+1, N])

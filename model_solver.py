@@ -236,6 +236,10 @@ class MacrophageModel:
         v = self.v
         V_site = p.V_tot / p.M
 
+        space_and_structure = {
+            "volume_fraction": U * v,
+        }
+
         spatial = {
             "cell_density": np.sum(U, axis=2),
             "volume_fraction": np.sum(U * v, axis=2),
@@ -262,7 +266,8 @@ class MacrophageModel:
         return {
             "spatial": spatial,
             "structure": structure,
-            "totals": totals
+            "totals": totals,
+            "space_and_structure": space_and_structure
         }
 
     def validate_results(self, U: np.ndarray, strict: bool = False):

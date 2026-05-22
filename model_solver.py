@@ -7,6 +7,7 @@ import warnings
 from scipy.integrate import solve_ivp
 from scipy.sparse import kron, diags
 from dataclasses import dataclass, field
+from typing import Callable
 
 @dataclass
 class Params:
@@ -30,7 +31,9 @@ class Params:
         self.delta_v = self.v_max / self.N
 
 class MacrophageModel:
-    def __init__(self, p: Params):
+    def __init__(self, p: Params, 
+                 offloading_func: Callable[[np.ndarray, int], np.ndarray] = None, 
+                 uptake_func: Callable[[np.ndarray, int], np.ndarray] = None):
         self.p = p
         # Cache static arrays here to save time during ODE integration
         self.v = 1.0 + np.arange(p.N + 1) * p.delta_v
@@ -38,6 +41,16 @@ class MacrophageModel:
         self.i_array = np.arange(p.M + 1)
         self.n_decay = 1.0 - self.n_array / p.N
         self.n_growth = self.n_array / p.N
+
+        # Default to the standard linear behaviour if no custom functions are provided
+        if offloading_func is None:
+            offloading_func = lambda n, N: 1.0 - n / N
+        if uptake_func is None:
+            uptake_func = lambda n, N: n / N
+            
+        # Generate and store the arrays using the input functions
+        self.offloading = offloading_func(self.n_array, self.p.N)
+        self.uptake = uptake_func(self.n_array, self.p.N)
         
         # Pre-compute the Jacobian sparsity matrix 
         self.jac_sparsity = self._build_sparsity_matrix()
@@ -109,8 +122,8 @@ class MacrophageModel:
 
         if M >= 2:
             du[1:M, 0] = (
-                - N * p.kplus * self.n_decay[0] * phi[1:M] * u[1:M, 0]
-                + p.kminus * self.n_growth[1] * u[1:M, 1]
+                - N * p.kplus * self.uptake[0] * phi[1:M] * u[1:M, 0]
+                + p.kminus * self.offloading[1] * u[1:M, 1]
                 + M**2 * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
                     - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
                 )
@@ -118,8 +131,8 @@ class MacrophageModel:
             )
 
             du[1:M, N] = (
-                N * p.kplus * self.n_decay[N-1] * phi[1:M] * u[1:M, N-1]
-                - N * p.kminus * self.n_growth[N] * u[1:M, N]
+                N * p.kplus * self.uptake[N-1] * phi[1:M] * u[1:M, N-1]
+                - N * p.kminus * self.offloading[N] * u[1:M, N]
                 + M**2 * p.D_min * (
                     phi_H[1:M, N] * (u[0:M-1, N] + u[2:M+1, N])
                     - u[1:M, N] * (phi_H[0:M-1, N] + phi_H[2:M+1, N])
@@ -132,15 +145,15 @@ class MacrophageModel:
             D_n = p.D_min + (1.0 - p.D_min) * self.n_decay[n]
 
             du[0, 1:N] = (
-                N * p.kplus * phi[0] * (self.n_decay[n - 1] * u[0, 0:N-1] - self.n_decay[n] * u[0, 1:N])
-                + N * p.kminus * (self.n_growth[n + 1] * u[0, 2:N+1] - self.n_growth[n] * u[0, 1:N])
+                N * p.kplus * phi[0] * (self.uptake[n - 1] * u[0, 0:N-1] - self.uptake[n] * u[0, 1:N])
+                + N * p.kminus * (self.offloading[n + 1] * u[0, 2:N+1] - self.offloading[n] * u[0, 1:N])
                 + M**2 * D_n * (phi_H[0, 1:N] * u[1, 1:N] - phi_H[1, 1:N] * u[0, 1:N])
                 - p.beta * u[0, 1:N]
             )
 
             du[M, 1:N] = (
-                N * p.kplus * phi[M] * (self.n_decay[n - 1] * u[M, 0:N-1] - self.n_decay[n] * u[M, 1:N])
-                + N * p.kminus * (self.n_growth[n + 1] * u[M, 2:N+1] - self.n_growth[n] * u[M, 1:N])
+                N * p.kplus * phi[M] * (self.uptake[n - 1] * u[M, 0:N-1] - self.uptake[n] * u[M, 1:N])
+                + N * p.kminus * (self.offloading[n + 1] * u[M, 2:N+1] - self.offloading[n] * u[M, 1:N])
                 + M**2 * D_n * (phi_H[M, 1:N] * u[M-1, 1:N] - phi_H[M-1, 1:N] * u[M, 1:N] )
                 - M * p.gamma * D_n * u[M, 1:N]
                 - p.beta * u[M, 1:N]
@@ -150,12 +163,12 @@ class MacrophageModel:
                 D_n_2d = p.D_min + (1.0 - p.D_min) * self.n_decay[n][None, :]
                 du[1:M, 1:N] = (
                     N * p.kplus * phi[1:M, None] * (
-                        self.n_decay[n - 1][None, :] * u[1:M, 0:N-1]
-                        - self.n_decay[n][None, :] * u[1:M, 1:N]
+                        self.uptake[n - 1][None, :] * u[1:M, 0:N-1]
+                        - self.uptake[n][None, :] * u[1:M, 1:N]
                     )
                     + N * p.kminus * (
-                        self.n_growth[n + 1][None, :] * u[1:M, 2:N+1]
-                        - self.n_growth[n][None, :] * u[1:M, 1:N]
+                        self.offloading[n + 1][None, :] * u[1:M, 2:N+1]
+                        - self.offloading[n][None, :] * u[1:M, 1:N]
                     )
                     + M**2 * D_n_2d * (
                         phi_H[1:M, 1:N] * (u[0:M-1, 1:N] + u[2:M+1, 1:N])
@@ -165,31 +178,31 @@ class MacrophageModel:
                 )
 
         du[0, 0] = (
-            - N * p.kplus * phi[0] * u[0, 0]
-            + p.kminus * u[0, 1]
+            - N * p.kplus * self.uptake[0] * phi[0] * u[0, 0]
+            + p.kminus * self.offloading[0] * u[0, 1]
             + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
             + M**2 * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
             - p.beta * u[0, 0]
         )
 
         du[0, N] = (
-            p.kplus * phi[0] * u[0, N-1]
-            - N * p.kminus * u[0, N]
+            p.kplus * self.uptake[N] * phi[0] * u[0, N-1]
+            - N * p.kminus * self.offloading[N] * u[0, N]
             + M**2 * p.D_min * (phi_H[0, N] * u[1, N] - phi_H[1, N] * u[0, N])
             - p.beta * u[0, N]
         )
 
         du[M, 0] = (
-            - N * p.kplus * phi[M] * u[M, 0]
-            + p.kminus * u[M, 1]
+            - N * p.kplus * self.uptake[0] * phi[M] * u[M, 0]
+            + p.kminus * self.offloading[0] * u[M, 1]
             + M**2 * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
             - M * p.gamma * u[M, 0]
             - p.beta * u[M, 0]
         )
 
         du[M, N] = (
-            p.kplus * phi[M] * u[M, N-1]
-            - N * p.kminus * u[M, N]
+            p.kplus  * self.uptake[N] * phi[M] * u[M, N-1]
+            - N * p.kminus * self.offloading[N] * u[M, N]
             + M**2 * p.D_min * (phi_H[M, N] * u[M-1, N] - phi_H[M-1, N] * u[M, N])
             - M * p.gamma * p.D_min * u[M, N]
             - p.beta * u[M, N]

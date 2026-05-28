@@ -56,10 +56,11 @@ class MacrophageModel:
         return np.clip(phi, 0.0, 1.0)
 
     def compute_VL(self, u: np.ndarray):
+        i_term = 1 - (self.i_array[:, None] / self.p.M)
         if u.ndim == 3:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(u * self.n_array, axis=(1, 2))
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(i_term * u * self.n_array, axis=(1, 2))
         else:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(u * self.n_array)
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(i_term * u * self.n_array)
 
     def compute_mean_lipid_load_spatial(self, U: np.ndarray) -> np.ndarray:
         """

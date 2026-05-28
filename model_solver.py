@@ -75,6 +75,12 @@ class MacrophageModel:
         else:
             return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(i_term * u * self.n_array)
 
+    def compute_internalised_lipid_volume(self, u: np.ndarray) -> np.ndarray:
+        if u.ndim == 3:
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum( u * self.n_array, axis=(1, 2))
+        else:
+            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum( u * self.n_array)
+
     def compute_mean_lipid_load_spatial(self, U: np.ndarray) -> np.ndarray:
         """
         Computes:  sum_n(n * u_{i,n}) / sum_n(u_{i,n})
@@ -272,7 +278,7 @@ class MacrophageModel:
             "average_cell_density": np.sum(U, axis=(1, 2))/p.M,
             "tissue_volume_fraction": np.sum(U * v, axis=(1, 2))/p.M,
             "mean_lipid_load": self.compute_mean_lipid_load_domain(U),
-            "internalised_lipid_volume": self.compute_VL(U),
+            "internalised_lipid_volume": self.compute_internalised_lipid_volume(U),
         }
         totals["macrophage_number"] = p.V_tot * totals["average_cell_density"]
         totals["cell_volume"] = p.V_tot * totals["tissue_volume_fraction"]

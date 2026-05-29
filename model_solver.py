@@ -15,8 +15,8 @@ class Params:
     N: int
     kplus: float
     kminus: float
-    beta: float
     D_min: float
+    D_max: float
     gamma: float
     sigma_b: float
     sigma_max: float
@@ -127,14 +127,15 @@ class MacrophageModel:
 
         du = np.zeros_like(u)
 
+        # Structure boundaries
         if M >= 2:
             du[1:M, 0] = (
                 - N * p.kplus * self.uptake[0] * phi[1:M] * u[1:M, 0]
                 + p.kminus * self.offloading[1] * u[1:M, 1]
-                + M**2 * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
+                + M**2 * p.D_max * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
                     - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
                 )
-                - p.beta * u[1:M, 0]
+                - u[1:M, 0]
             )
 
             du[1:M, N] = (
@@ -144,18 +145,19 @@ class MacrophageModel:
                     phi_H[1:M, N] * (u[0:M-1, N] + u[2:M+1, N])
                     - u[1:M, N] * (phi_H[0:M-1, N] + phi_H[2:M+1, N])
                 )
-                - p.beta * u[1:M, N]
+                - u[1:M, N]
             )
 
         if N >= 2:
             n = np.arange(1, N)
-            D_n = p.D_min + (1.0 - p.D_min) * self.n_decay[n]
+            D_n = p.D_min + (p.D_max - p.D_min) * self.n_decay[n]
 
+            # Spatial boundaries
             du[0, 1:N] = (
                 N * p.kplus * phi[0] * (self.uptake[n - 1] * u[0, 0:N-1] - self.uptake[n] * u[0, 1:N])
                 + N * p.kminus * (self.offloading[n + 1] * u[0, 2:N+1] - self.offloading[n] * u[0, 1:N])
                 + M**2 * D_n * (phi_H[0, 1:N] * u[1, 1:N] - phi_H[1, 1:N] * u[0, 1:N])
-                - p.beta * u[0, 1:N]
+                - u[0, 1:N]
             )
 
             du[M, 1:N] = (
@@ -163,11 +165,12 @@ class MacrophageModel:
                 + N * p.kminus * (self.offloading[n + 1] * u[M, 2:N+1] - self.offloading[n] * u[M, 1:N])
                 + M**2 * D_n * (phi_H[M, 1:N] * u[M-1, 1:N] - phi_H[M-1, 1:N] * u[M, 1:N] )
                 - M * p.gamma * D_n * u[M, 1:N]
-                - p.beta * u[M, 1:N]
+                - u[M, 1:N]
             )
 
+            # Interior
             if M >= 2:
-                D_n_2d = p.D_min + (1.0 - p.D_min) * self.n_decay[n][None, :]
+                D_n_2d = p.D_min + (p.D_max - p.D_min) * self.n_decay[n][None, :]
                 du[1:M, 1:N] = (
                     N * p.kplus * phi[1:M, None] * (
                         self.uptake[n - 1][None, :] * u[1:M, 0:N-1]
@@ -181,30 +184,31 @@ class MacrophageModel:
                         phi_H[1:M, 1:N] * (u[0:M-1, 1:N] + u[2:M+1, 1:N])
                         - u[1:M, 1:N] * (phi_H[0:M-1, 1:N] + phi_H[2:M+1, 1:N])
                     )
-                    - p.beta * u[1:M, 1:N]
+                    - u[1:M, 1:N]
                 )
 
+        # Corners
         du[0, 0] = (
             - N * p.kplus * self.uptake[0] * phi[0] * u[0, 0]
             + p.kminus * self.offloading[0] * u[0, 1]
             + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
-            + M**2 * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
-            - p.beta * u[0, 0]
+            + M**2 * p.D_max * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
+            - u[0, 0]
         )
 
         du[0, N] = (
             p.kplus * self.uptake[N] * phi[0] * u[0, N-1]
             - N * p.kminus * self.offloading[N] * u[0, N]
             + M**2 * p.D_min * (phi_H[0, N] * u[1, N] - phi_H[1, N] * u[0, N])
-            - p.beta * u[0, N]
+            - u[0, N]
         )
 
         du[M, 0] = (
             - N * p.kplus * self.uptake[0] * phi[M] * u[M, 0]
             + p.kminus * self.offloading[0] * u[M, 1]
-            + M**2 * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
-            - M * p.gamma * u[M, 0]
-            - p.beta * u[M, 0]
+            + M**2 * p.D_max * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
+            - M * p.gamma * p.D_max * u[M, 0]
+            - u[M, 0]
         )
 
         du[M, N] = (
@@ -212,7 +216,7 @@ class MacrophageModel:
             - N * p.kminus * self.offloading[N] * u[M, N]
             + M**2 * p.D_min * (phi_H[M, N] * u[M-1, N] - phi_H[M-1, N] * u[M, N])
             - M * p.gamma * p.D_min * u[M, N]
-            - p.beta * u[M, N]
+            - u[M, N]
         )
 
         return du.ravel()

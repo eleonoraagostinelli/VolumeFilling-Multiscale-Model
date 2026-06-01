@@ -4,14 +4,15 @@
 
 import numpy as np
 import warnings
+from scipy import spatial
 from scipy.integrate import solve_ivp
-from scipy.sparse import kron, diags
+from scipy.sparse import csr_matrix, kron, diags, lil_matrix
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 
 @dataclass
 class Params:
-    M: int
+    J: int
     N: int
     kplus: float
     kminus: float
@@ -20,6 +21,10 @@ class Params:
     gamma: float
     sigma_b: float
     sigma_max: float
+    sigma_l: float
+    sigma_w: float
+    sigma_H: float
+    alpha: float
     V_tot: float    
     v_max: float
     delta_v: float = field(init=False) 
@@ -38,15 +43,15 @@ class MacrophageModel:
         # Cache static arrays here to save time during ODE integration
         self.v = 1.0 + np.arange(p.N + 1) * p.delta_v
         self.n_array = np.arange(p.N + 1)
-        self.i_array = np.arange(p.M + 1)
+        self.j_array = np.arange(p.J + 1)
         self.n_decay = 1.0 - self.n_array / p.N
         self.n_growth = self.n_array / p.N
 
         # Default to the standard linear behaviour if no custom functions are provided
         if offloading_func is None:
-            offloading_func = lambda n, N: 1.0 - n / N
+            offloading_func = lambda n, N: n / N
         if uptake_func is None:
-            uptake_func = lambda n, N: n / N
+            uptake_func = lambda n, N: 1.0 - n / N
             
         # Generate and store the arrays using the input functions
         self.offloading = offloading_func(self.n_array, self.p.N)
@@ -55,11 +60,24 @@ class MacrophageModel:
         # Pre-compute the Jacobian sparsity matrix 
         self.jac_sparsity = self._build_sparsity_matrix()
 
-    def compute_phi(self, u: np.ndarray) -> np.ndarray:
+    def _unpack_state(self, U: np.ndarray):
         """
-        No-voids constraint: phi_i = 1 - sum_n v_n u[i,n]
+        Extracts the individual variable arrays from the combined state matrix.
         """
-        phi = 1.0 - np.sum(u * self.v, axis=-1)
+        N = self.p.N
+        m = U[..., :N+1]
+        l = U[..., N+1]
+        w = U[..., N+2]
+        H = U[..., N+3]
+        phi = l + w
+        
+        return m, l, w, H, phi
+
+    def compute_phi(self, m: np.ndarray) -> np.ndarray:
+        """
+        No-voids constraint: phi_j = 1 - sum_n v_n m[j,n]
+        """
+        phi = 1.0 - np.sum(m * self.v, axis=-1)
         
         min_phi = np.min(phi)
         if min_phi < -self.p.tol:
@@ -68,84 +86,136 @@ class MacrophageModel:
         
         return np.clip(phi, 0.0, 1.0)
 
-    def compute_VL(self, u: np.ndarray):
-        i_term = 1 - (self.i_array[:, None] / self.p.M)
-        if u.ndim == 3:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(i_term * u * self.n_array, axis=(1, 2))
-        else:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum(i_term * u * self.n_array)
-
-    def compute_internalised_lipid_volume(self, u: np.ndarray) -> np.ndarray:
-        if u.ndim == 3:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum( u * self.n_array, axis=(1, 2))
-        else:
-            return (self.p.theta / self.p.M) * self.p.delta_v * np.sum( u * self.n_array)
-
-    def compute_mean_lipid_load_spatial(self, U: np.ndarray) -> np.ndarray:
+    def compute_VL(self, m: np.ndarray):
         """
-        Computes:  sum_n(n * u_{i,n}) / sum_n(u_{i,n})
-        U shape: (Time, M+1, N+1)
+        Computes: theta/J * v_max/N * sum_j sum_n (1 - j/J) * v_n * m[j,n]
         """
-        total_fraction = np.sum(U * self.n_array, axis=2) 
-        total_concentration = np.sum(U, axis=2)
+        j_term = 1 - (self.j_array[:, None] / self.p.J)
+        if m.ndim == 3:
+            return (self.p.theta / self.p.J) * self.p.delta_v * np.sum(j_term * m * self.n_array, axis=(1, 2))
+        else:
+            return (self.p.theta / self.p.J) * self.p.delta_v * np.sum(j_term * m * self.n_array)
+
+    def compute_internalised_lipid_volume(self, m: np.ndarray) -> np.ndarray:
+        """
+        Computes: theta/J * v_max/N * sum_j sum_n v_n * m[j,n]
+        """
+        if m.ndim == 3:
+            return (self.p.theta / self.p.J) * self.p.delta_v * np.sum( m * self.n_array, axis=(1, 2))
+        else:
+            return (self.p.theta / self.p.J) * self.p.delta_v * np.sum( m * self.n_array)
+
+    def compute_mean_lipid_load_spatial(self, m: np.ndarray) -> np.ndarray:
+        """
+        Computes:  sum_n(n * m_{j,n}) / sum_n(m_{j,n})
+        m shape: (Time, J+1, N+1)
+        """
+        total_fraction = np.sum(m * self.n_array, axis=2) 
+        total_concentration = np.sum(m, axis=2)
         safe_denominator = np.where(total_concentration < 1e-12, 1.0, total_concentration)
         mean_load = (total_fraction / safe_denominator)
         return np.where(total_concentration < 1e-12, 0.0, mean_load)
 
-    def compute_mean_lipid_load_domain(self, U: np.ndarray) -> np.ndarray:
+    def compute_mean_lipid_load_domain(self, m: np.ndarray) -> np.ndarray:
         """
         Computes the domain-wide mean lipid volume fraction over time.
         """
-        total_domain_fraction = np.sum(U * self.n_array, axis=(1, 2)) 
-        total_domain_macrophages = np.sum(U, axis=(1, 2))
+        total_domain_fraction = np.sum(m * self.n_array, axis=(1, 2)) 
+        total_domain_macrophages = np.sum(m, axis=(1, 2))
         safe_denominator = np.where(total_domain_macrophages < 1e-12, 1.0, total_domain_macrophages)
         mean_domain_fraction = total_domain_fraction / safe_denominator
         return np.where(total_domain_macrophages < 1e-12, 0.0, mean_domain_fraction)
 
     def _build_sparsity_matrix(self):
         """
-        Generates the Jacobian sparsity matrix for the atherosclerosis model.
+        Build the Jacobian sparsity matrix for the model.
+
+        This version uses a block-tridiagonal spatial structure:
+        each spatial node i may depend on variables at i-1, i, and i+1.
+
+        Within each spatial block, the dependence is dense across:
+            m_0, ..., m_N, l, w, H
+
+        Shape:
+            ((M + 1) * (N + 4), (M + 1) * (N + 4))
         """
         p = self.p
-        spatial_diags = [np.ones(p.M), np.ones(p.M + 1), np.ones(p.M)]
-        spatial_sparse = diags(spatial_diags, offsets=[-1, 0, 1], format='csr')
-        lipid_dense = np.ones((p.N + 1, p.N + 1))
-        jac_sparsity = kron(spatial_sparse, lipid_dense, format='lil')
-        jac_sparsity[0, :] = 1
-        return jac_sparsity.tocsr()
+
+        num_spatial = p.J + 1
+        block_size = p.N + 4
+
+        spatial_diags = [
+            np.ones(num_spatial - 1),  # lower diagonal: i depends on i-1
+            np.ones(num_spatial),      # main diagonal: i depends on i
+            np.ones(num_spatial - 1),  # upper diagonal: i depends on i+1
+        ]
+
+        spatial_sparse = diags(
+            spatial_diags,
+            offsets=[-1, 0, 1],
+            format="csr",
+        )
+
+        block_dense = np.ones((block_size, block_size), dtype=bool)
+
+        jac_sparsity = kron(
+            spatial_sparse,
+            block_dense,
+            format="csr",
+        )
+
+        return jac_sparsity
 
     def rhs(self, t: float, y: np.ndarray) -> np.ndarray:
-        M, N, p = self.p.M, self.p.N, self.p
-        u = y.reshape((M + 1, N + 1))
+        J, N, p = self.p.J, self.p.N, self.p
+        U = y.reshape((J + 1, N + 4)) # N+1 strctured populations, N+2 = LDL, N+3 = water, N+4 = HDL
+        m, l, w, H, phi = self._unpack_state(U)
+        
+        VLt = self.compute_VL(m)
 
-        phi = self.compute_phi(u)
-        VLt = self.compute_VL(u)
+        # FLUID VELOCITY
+        u = np.zeros(J + 1)
+        Diff_n = p.D_min + (p.D_max - p.D_min) * self.n_decay
+        # Pre-calculate the entire summation term for all spatial nodes at once
+        flux_sum = np.zeros(J + 1)
+        flux_sum[0] = np.sum(J**2 * Diff_n * (phi[0] * m[1, :] - phi[1] * m[0, :]) * self.v)
+        flux_internal = (J**2 * Diff_n[None, :] * (phi[1:J, None] * (m[0:J-1, :] + m[2:J+1, :]) - 
+                  m[1:J, :] * (phi[0:J-1, None] + phi[2:J+1, None])))
+        flux_sum[1:J] = np.sum(flux_internal * self.v, axis=1)
+        flux_sum[J] = np.sum((J**2 * Diff_n * (phi[J] * m[J-1, :] - m[J, :] * phi[J-1]) 
+                      - J * p.gamma * Diff_n * m[J, :]) * self.v)
 
-        capacity_val = (p.V_tot / M) * phi[:, None] - self.v[None, :]
-        H = (capacity_val >= 0).astype(float)
-        phi_H = phi[:, None] * H
+        u[0] = ((p.sigma_l + p.sigma_w)/phi[0] + p.sigma_b + 
+                p.sigma_max * VLt / (1.0 + VLt) + 1/(J * phi[0]) * flux_sum[0])
+        for i in range(1, J + 1):
+            u[i] = u[i-1] * phi[i-1] / phi[i] + 1/(J * phi[i]) * flux_sum[i]
 
-        du = np.zeros_like(u)
+        capacity_val = (p.V_tot / J) * phi[:, None] - self.v[None, :]
+        Heav = (capacity_val >= 0).astype(float)
+        phi_H = phi[:, None] * Heav
 
+        du = np.zeros_like(U)
+
+        # MACROPHAGE EQUATIONS
         # Structure boundaries
-        if M >= 2:
-            du[1:M, 0] = (
-                - N * p.kplus * self.uptake[0] * phi[1:M] * u[1:M, 0]
-                + p.kminus * self.offloading[1] * u[1:M, 1]
-                + M**2 * p.D_max * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
-                    - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
+        if J >= 2:
+            du[1:J, 0] = (
+                - N * p.kplus * self.uptake[0] * l[1:J] * m[1:J, 0]
+                + N * p.kminus * self.offloading[1] * H[1:J] * m[1:J, 1]
+                + J**2 * p.D_max * (phi[1:J] * (m[0:J-1, 0] + m[2:J+1, 0])
+                    - m[1:J, 0] * (phi[0:J-1] + phi[2:J+1])
                 )
-                - u[1:M, 0]
+                - m[1:J, 0]
             )
 
-            du[1:M, N] = (
-                N * p.kplus * self.uptake[N-1] * phi[1:M] * u[1:M, N-1]
-                - N * p.kminus * self.offloading[N] * u[1:M, N]
-                + M**2 * p.D_min * (
-                    phi_H[1:M, N] * (u[0:M-1, N] + u[2:M+1, N])
-                    - u[1:M, N] * (phi_H[0:M-1, N] + phi_H[2:M+1, N])
+            du[1:J, N] = (
+                N * p.kplus * self.uptake[N-1] * l[1:J] * m[1:J, N-1]
+                - N * p.kminus * self.offloading[N] * H[1:J] * m[1:J, N]
+                + J**2 * p.D_min * (
+                    phi[1:J] * (m[0:J-1, N] + m[2:J+1, N])
+                    - m[1:J, N] * (phi[0:J-1] + phi[2:J+1])
                 )
-                - u[1:M, N]
+                - m[1:J, N]
             )
 
         if N >= 2:
@@ -154,80 +224,100 @@ class MacrophageModel:
 
             # Spatial boundaries
             du[0, 1:N] = (
-                N * p.kplus * phi[0] * (self.uptake[n - 1] * u[0, 0:N-1] - self.uptake[n] * u[0, 1:N])
-                + N * p.kminus * (self.offloading[n + 1] * u[0, 2:N+1] - self.offloading[n] * u[0, 1:N])
-                + M**2 * D_n * (phi_H[0, 1:N] * u[1, 1:N] - phi_H[1, 1:N] * u[0, 1:N])
-                - u[0, 1:N]
+                N * p.kplus * l[0] * (self.uptake[n - 1] * m[0, 0:N-1] - self.uptake[n] * m[0, 1:N])
+                + N * p.kminus * H[0] * (self.offloading[n + 1] * m[0, 2:N+1] - self.offloading[n] * m[0, 1:N])
+                + J**2 * D_n * (phi[0] * m[1, 1:N] - phi[1] * m[0, 1:N])
+                - m[0, 1:N]
             )
 
-            du[M, 1:N] = (
-                N * p.kplus * phi[M] * (self.uptake[n - 1] * u[M, 0:N-1] - self.uptake[n] * u[M, 1:N])
-                + N * p.kminus * (self.offloading[n + 1] * u[M, 2:N+1] - self.offloading[n] * u[M, 1:N])
-                + M**2 * D_n * (phi_H[M, 1:N] * u[M-1, 1:N] - phi_H[M-1, 1:N] * u[M, 1:N] )
-                - M * p.gamma * D_n * u[M, 1:N]
-                - u[M, 1:N]
+            du[J, 1:N] = (
+                N * p.kplus * l[J] * (self.uptake[n - 1] * m[J, 0:N-1] - self.uptake[n] * m[J, 1:N])
+                + N * p.kminus * H[J] * (self.offloading[n + 1] * m[J, 2:N+1] - self.offloading[n] * m[J, 1:N])
+                + J**2 * D_n * (phi[J] * m[J-1, 1:N] - phi[J-1] * m[J, 1:N] )
+                - J * p.gamma * D_n * m[J, 1:N]
+                - m[J, 1:N]
             )
 
             # Interior
-            if M >= 2:
+            if J >= 2:
                 D_n_2d = p.D_min + (p.D_max - p.D_min) * self.n_decay[n][None, :]
-                du[1:M, 1:N] = (
-                    N * p.kplus * phi[1:M, None] * (
-                        self.uptake[n - 1][None, :] * u[1:M, 0:N-1]
-                        - self.uptake[n][None, :] * u[1:M, 1:N]
+                du[1:J, 1:N] = (
+                    N * p.kplus * l[1:J, None] * (
+                        self.uptake[n - 1][None, :] * m[1:J, 0:N-1]
+                        - self.uptake[n][None, :] * m[1:J, 1:N]
                     )
-                    + N * p.kminus * (
-                        self.offloading[n + 1][None, :] * u[1:M, 2:N+1]
-                        - self.offloading[n][None, :] * u[1:M, 1:N]
+                    + N * p.kminus * H[1:J, None] * (
+                        self.offloading[n + 1][None, :] * m[1:J, 2:N+1]
+                        - self.offloading[n][None, :] * m[1:J, 1:N]
                     )
-                    + M**2 * D_n_2d * (
-                        phi_H[1:M, 1:N] * (u[0:M-1, 1:N] + u[2:M+1, 1:N])
-                        - u[1:M, 1:N] * (phi_H[0:M-1, 1:N] + phi_H[2:M+1, 1:N])
+                    + J**2 * D_n_2d * (
+                        phi[1:J, None] * (m[0:J-1, 1:N] + m[2:J+1, 1:N])
+                        - m[1:J, 1:N] * (phi[0:J-1, None] + phi[2:J+1, None])
                     )
-                    - u[1:M, 1:N]
+                    - m[1:J, 1:N]
                 )
 
         # Corners
         du[0, 0] = (
-            - N * p.kplus * self.uptake[0] * phi[0] * u[0, 0]
-            + p.kminus * self.offloading[0] * u[0, 1]
-            + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
-            + M**2 * p.D_max * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
-            - u[0, 0]
+            - N * p.kplus * self.uptake[0] * l[0] * m[0, 0]
+            + N * p.kminus * self.offloading[1] * H[0] * m[0, 1]
+            + J * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi[0]
+            + J**2 * p.D_max * (phi[0] * m[1, 0] - phi[1] * m[0, 0])
+            - m[0, 0]
         )
 
         du[0, N] = (
-            p.kplus * self.uptake[N] * phi[0] * u[0, N-1]
-            - N * p.kminus * self.offloading[N] * u[0, N]
-            + M**2 * p.D_min * (phi_H[0, N] * u[1, N] - phi_H[1, N] * u[0, N])
-            - u[0, N]
+            N * p.kplus * self.uptake[N - 1] * l[0] * m[0, N-1]
+            - N * p.kminus * self.offloading[N] * H[0] * m[0, N]
+            + J**2 * p.D_min * (phi[0] * m[1, N] - phi[1] * m[0, N])
+            - m[0, N]
         )
 
-        du[M, 0] = (
-            - N * p.kplus * self.uptake[0] * phi[M] * u[M, 0]
-            + p.kminus * self.offloading[0] * u[M, 1]
-            + M**2 * p.D_max * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
-            - M * p.gamma * p.D_max * u[M, 0]
-            - u[M, 0]
+        du[J, 0] = (
+            - N * p.kplus * self.uptake[0] * l[J] * m[J, 0]
+            + N * p.kminus * self.offloading[1] * H[J] * m[J, 1]
+            + J**2 * p.D_max * (phi[J] * m[J-1, 0] - phi[J-1] * m[J, 0])
+            - J * p.gamma * p.D_max * m[J, 0]
+            - m[J, 0]
         )
 
-        du[M, N] = (
-            p.kplus  * self.uptake[N] * phi[M] * u[M, N-1]
-            - N * p.kminus * self.offloading[N] * u[M, N]
-            + M**2 * p.D_min * (phi_H[M, N] * u[M-1, N] - phi_H[M-1, N] * u[M, N])
-            - M * p.gamma * p.D_min * u[M, N]
-            - u[M, N]
+        du[J, N] = (
+            N * p.kplus  * self.uptake[N - 1] * l[J] * m[J, N-1]
+            - N * p.kminus * self.offloading[N] * H[J] * m[J, N]
+            + J**2 * p.D_min * (phi[J] * m[J-1, N] - phi[J-1] * m[J, N])
+            - J * p.gamma * p.D_min * m[J, N]
+            - m[J, N]
         )
+
+        # LDL EQUATIONS
+        du[0, N+1] = (J * p.sigma_l - J * u[0] * l[0] - N * p.kplus * p.delta_v * l[0] 
+                      * np.sum(self.uptake * m[0, :N+1]))
+        du[1:J+1, N+1] = (J * (u[0:J] * l[0:J] - u[1:J+1] * l[1:J+1]) - N * p.kplus * p.delta_v 
+                          * l[1:J+1] * np.sum(self.uptake * m[1:J+1, :], axis=1))
+        
+        # WATER EQUATIONS
+        du[0, N+2] = ((J * p.sigma_w - J * u[0] * w[0]) + N * p.kminus * H[0] * p.delta_v 
+                      * np.sum(self.offloading * m[0, :]) + np.sum(m[0, :] * self.v))
+        du[1:J+1, N+2] = (J * (u[0:J] * w[0:J] - u[1:J+1] * w[1:J+1]) + N * p.kminus * H[1:J+1] * p.delta_v 
+                          * np.sum(self.offloading * m[1:J+1, :], axis=1) + np.sum(m[1:J+1, :] * self.v, axis=1))
+        
+        # HDL EQUATIONS
+        du[0, N+3] = (J * p.sigma_H - J * u[0] * H[0] - p.alpha * N * p.kminus * H[0] 
+                      * np.sum(self.offloading * m[0, :]) )
+        du[1:J+1, N+3] = (J * (u[0:J] * H[0:J] - u[1:J+1] * H[1:J+1]) - p.alpha * N * p.kminus 
+                          * H[1:J+1] * np.sum(self.offloading * m[1:J+1, :], axis=1) )
+
 
         return du.ravel()
 
     def solve(self, t_span: tuple, t_eval: np.ndarray, y0: np.ndarray = None):
         """
-        Runs the BDF solver and returns the resulting 'U' 3D array (time, M+1, N+1) 
+        Runs the BDF solver and returns the resulting 'U' 3D array (time, J+1, N+1) 
         and the full solver output object.
         """
         if y0 is None:
-            u0 = np.zeros((self.p.M + 1, self.p.N + 1))
+            u0 = np.zeros((self.p.J + 1, self.p.N + 4))
+            u0[:,self.p.N+2:self.p.N+4] = 1.0
             y0 = u0.ravel()
 
         sol = solve_ivp(
@@ -244,11 +334,49 @@ class MacrophageModel:
         if not sol.success:
             warnings.warn(f"Solver failed: {sol.message}")
             
-        U = sol.y.T.reshape((-1, self.p.M + 1, self.p.N + 1))
+        U = sol.y.T.reshape((-1, self.p.J + 1, self.p.N + 4))
 
         # Run sanity checks on the results
         self.validate_results(U, strict=False)
         return U, sol
+    
+    def compute_velocity_history(self, U: np.ndarray) -> np.ndarray:
+        """
+        Reconstructs the fluid velocity 'u' profile over time from the solver output.
+        U shape: (Time, J + 1, N + 4)
+        Returns: array of shape (Time, J + 1)
+        """
+        J, N, p = self.p.J, self.p.N, self.p
+        num_steps = U.shape[0]
+        u_history = np.zeros((num_steps, J + 1))
+        
+        Diff_n = p.D_min + (p.D_max - p.D_min) * self.n_decay
+        
+        for t_idx in range(num_steps):
+            # Extract the 2D spatial grid for the current time step
+            m, l, w, H, phi = self._unpack_state(U[t_idx])
+            phi = l + w
+            VLt = self.compute_VL(m)
+            
+            # Compute spatial node fluxes [cite: 63, 64]
+            flux_sum = np.zeros(J + 1)
+            flux_sum[0] = np.sum(J**2 * Diff_n * (phi[0] * m[1, :] - phi[1] * m[0, :]) * self.v)
+            
+            if J >= 2:
+                flux_internal = (J**2 * Diff_n[None, :] * (phi[1:J, None] * (m[0:J-1, :] + m[2:J+1, :]) - 
+                          m[1:J, :] * (phi[0:J-1, None] + phi[2:J+1, None])))
+                flux_sum[1:J] = np.sum(flux_internal * self.v, axis=1)
+                
+            flux_sum[J] = np.sum((J**2 * Diff_n * (phi[J] * m[J-1, :] - m[J, :] * phi[J-1]) 
+                          - J * p.gamma * Diff_n * m[J, :]) * self.v)
+
+            # Reconstruct the recursive velocity profile [cite: 60]
+            u_history[t_idx, 0] = ((p.sigma_l + p.sigma_w)/phi[0] + p.sigma_b + 
+                    p.sigma_max * VLt / (1.0 + VLt) + 1/(J * phi[0]) * flux_sum[0]) # [cite: 57, 60]
+            for i in range(1, J + 1):
+                u_history[t_idx, i] = u_history[t_idx, i-1] * phi[i-1] / phi[i] + 1/(J * phi[i]) * flux_sum[i] # [cite: 60]
+                
+        return u_history
 
     def compute_diagnostics(self, U: np.ndarray) -> dict:
         """
@@ -258,31 +386,38 @@ class MacrophageModel:
         """
         p = self.p
         v = self.v
-        V_site = p.V_tot / p.M
+        V_site = p.V_tot / p.J
+
+        m, l, w, H, phi = self._unpack_state(U)
 
         space_and_structure = {
-            "volume_fraction": U * v,
+            "cell_density": m,
+            "cell_volume_fraction": m * v,
         }
 
         spatial = {
-            "cell_density": np.sum(U, axis=2),
-            "volume_fraction": np.sum(U * v, axis=2),
-            "mean_lipid_load": self.compute_mean_lipid_load_spatial(U),
-            "phi": self.compute_phi(U)
+            "cell_density": np.sum(m, axis=2),
+            "volume_fraction": np.sum(m * v, axis=2),
+            "mean_lipid_load": self.compute_mean_lipid_load_spatial(m),
+            "LDL_volume_fraction": l,
+            "water_volume_fraction": w,
+            "HDL_capacity": H,
+            "phi": phi,
+            "fluid_velocity": self.compute_velocity_history(U)
         }
         spatial["macrophage_number"] = V_site * spatial["cell_density"]
 
         structure = {
-            "average_cell_density": np.sum(U, axis=1)/self.p.M,
-            "tissue_volume_fraction": np.sum(U * v, axis=1)/self.p.M
+            "average_cell_density": np.sum(m, axis=1)/self.p.J,
+            "tissue_volume_fraction": np.sum(m * v, axis=1)/self.p.J
         }
         structure["macrophage_number"] = p.V_tot * structure["average_cell_density"]
 
         totals = {
-            "average_cell_density": np.sum(U, axis=(1, 2))/p.M,
-            "tissue_volume_fraction": np.sum(U * v, axis=(1, 2))/p.M,
-            "mean_lipid_load": self.compute_mean_lipid_load_domain(U),
-            "internalised_lipid_volume": self.compute_internalised_lipid_volume(U),
+            "average_cell_density": np.sum(m, axis=(1, 2))/p.J,
+            "tissue_volume_fraction": np.sum(m * v, axis=(1, 2))/p.J,
+            "mean_lipid_load": self.compute_mean_lipid_load_domain(m),
+            "internalised_lipid_volume": self.compute_internalised_lipid_volume(m),
         }
         totals["macrophage_number"] = p.V_tot * totals["average_cell_density"]
         totals["cell_volume"] = p.V_tot * totals["tissue_volume_fraction"]
@@ -296,33 +431,55 @@ class MacrophageModel:
 
     def validate_results(self, U: np.ndarray, strict: bool = False):
         """
-        Runs physical sanity checks on the solver output.
+        Runs rigorous physical and mathematical sanity checks on the solver output.
         If strict=True, raises a ValueError on physical violations.
         Otherwise, raises a warning.
         """
-        # print("--- Running Post-Simulation Sanity Checks ---")
-        
         if not np.isfinite(U).all():
             raise ValueError("NUMERICAL EXPLOSION: NaNs or Infs detected in the output matrix!")
             
+        # Global Non-Negativity Check
         min_u = np.min(U)
         if min_u < -self.p.tol:
-            msg = f"NON-NEGATIVITY VIOLATION: Minimum concentration is {min_u:.2e}."
+            msg = f"NON-NEGATIVITY VIOLATION: Minimum concentration value is {min_u:.2e}."
             if strict: raise ValueError(msg)
             else: warnings.warn(msg)
 
-        phi = self.compute_phi(U)
-        min_phi, max_phi = np.min(phi), np.max(phi)
+        # Unpack components using our helper method
+        m, l, w, H, phi = self._unpack_state(U)
+
+        # Calculate phi from the structural no-voids cell constraint
+        phi_no_voids = self.compute_phi(m)
+
+        # Check for deviations between phi computed from the no voids connstriant and from summing l and w
+        constraint_dev = np.max(np.abs(phi - phi_no_voids))
+        if constraint_dev > self.p.tol:  
+            msg = f"PHASE MISMATCH: Fluid volume (l+w) deviates from no-voids constraint! Max dev: {constraint_dev:.2e}"
+            if strict: raise ValueError(msg)
+            else: warnings.warn(msg)
         
-        if min_phi < -self.p.tol:
-            msg = f"CAPACITY VIOLATION: Minimum phi dropped to {min_phi:.2e}."
+        # Extracellular Volume Fraction Bounds Check
+        min_phi, max_phi = np.min(phi), np.max(phi)
+        if min_phi < -self.p.tol or max_phi > 1.0 + self.p.tol:
+            msg = f"CAPACITY VIOLATION: Fluid fraction phi out of bounds [0, 1]. Min: {min_phi:.2e}, Max: {max_phi:.2e}"
+            if strict: raise ValueError(msg)
+            else: warnings.warn(msg)
+
+        # NO-VOIDS CONSERVATION CHECK
+        # Total volume fraction: fluid fraction (phi) + macrophage volume fraction must equal 1.0
+        macro_vol_fraction = np.sum(m * self.v, axis=-1)
+        total_volume = phi + macro_vol_fraction
+        
+        # Calculate maximum absolute deviation from 1.0 across all space and time
+        max_dev = np.max(np.abs(total_volume - 1.0))
+        if max_dev > self.p.tol:  
+            msg = f"CONSERVATION VIOLATION: No-voids constraint broken! Max deviation from 1.0 is {max_dev:.2e}."
             if strict: raise ValueError(msg)
             else: warnings.warn(msg)
             
-        if max_phi > 1.0 + self.p.tol:
-            msg = f"CAPACITY VIOLATION: Maximum phi exceeded 1.0 ({max_phi:.2e})."
-            if strict: raise ValueError(msg)
-            else: warnings.warn(msg)
-            
-        # print("[\u2713] All physical constraints respected!")
-        # print("---------------------------------------------")
+        # Velocity Explosion Check
+        u_hist = self.compute_velocity_history(U)
+        max_u = np.max(np.abs(u_hist))
+        if max_u > 1e4:  # Threshold adjusted for non-dimensionalised scales
+            msg = f"VELOCITY SPIKE WARNING: Maximum fluid velocity reached an extreme value of {max_u:.2e}. System may be near-singular."
+            warnings.warn(msg)

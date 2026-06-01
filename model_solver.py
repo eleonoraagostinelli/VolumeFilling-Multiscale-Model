@@ -131,7 +131,7 @@ class MacrophageModel:
         if M >= 2:
             du[1:M, 0] = (
                 - N * p.kplus * self.uptake[0] * phi[1:M] * u[1:M, 0]
-                + p.kminus * self.offloading[1] * u[1:M, 1]
+                + N * p.kminus * self.offloading[1] * u[1:M, 1]
                 + M**2 * p.D_max * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
                     - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
                 )
@@ -190,14 +190,14 @@ class MacrophageModel:
         # Corners
         du[0, 0] = (
             - N * p.kplus * self.uptake[0] * phi[0] * u[0, 0]
-            + p.kminus * self.offloading[0] * u[0, 1]
+            + N * p.kminus * self.offloading[1] * u[0, 1]
             + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
             + M**2 * p.D_max * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
             - u[0, 0]
         )
 
         du[0, N] = (
-            p.kplus * self.uptake[N] * phi[0] * u[0, N-1]
+            N * p.kplus * self.uptake[N - 1] * phi[0] * u[0, N-1]
             - N * p.kminus * self.offloading[N] * u[0, N]
             + M**2 * p.D_min * (phi_H[0, N] * u[1, N] - phi_H[1, N] * u[0, N])
             - u[0, N]
@@ -205,14 +205,14 @@ class MacrophageModel:
 
         du[M, 0] = (
             - N * p.kplus * self.uptake[0] * phi[M] * u[M, 0]
-            + p.kminus * self.offloading[0] * u[M, 1]
+            + N * p.kminus * self.offloading[1] * u[M, 1]
             + M**2 * p.D_max * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
             - M * p.gamma * p.D_max * u[M, 0]
             - u[M, 0]
         )
 
         du[M, N] = (
-            p.kplus  * self.uptake[N] * phi[M] * u[M, N-1]
+            N * p.kplus  * self.uptake[N - 1] * phi[M] * u[M, N-1]
             - N * p.kminus * self.offloading[N] * u[M, N]
             + M**2 * p.D_min * (phi_H[M, N] * u[M-1, N] - phi_H[M-1, N] * u[M, N])
             - M * p.gamma * p.D_min * u[M, N]

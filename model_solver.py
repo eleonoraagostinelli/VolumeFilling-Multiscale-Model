@@ -130,24 +130,23 @@ class MacrophageModel:
         """
         Build the Jacobian sparsity matrix for the model.
 
-        This version uses a block-tridiagonal spatial structure:
-        each spatial node i may depend on variables at i-1, i, and i+1.
-
-        Within each spatial block, the dependence is dense across:
-            m_0, ..., m_N, l, w, H
-
-        Shape:
-            ((M + 1) * (N + 4), (M + 1) * (N + 4))
+        This version uses a block-tridiagonal spatial structure.
+        Within each spatial block, the internal structure is sparsified:
+        - Structural states m_n are tridiagonal (depend only on n-1, n, n+1).
+        - Macroscopic variables (l, w, H) depend on all m_n, and vice versa.
         """
         p = self.p
 
         num_spatial = p.J + 1
         block_size = p.N + 4
+        N = p.N
 
+        # 1. Spatial coupling (tridiagonal across J)
+        # Spatial node j depends on j-1, j, and j+1
         spatial_diags = [
-            np.ones(num_spatial - 1),  # lower diagonal: i depends on i-1
-            np.ones(num_spatial),      # main diagonal: i depends on i
-            np.ones(num_spatial - 1),  # upper diagonal: i depends on i+1
+            np.ones(num_spatial - 1),  # lower diagonal
+            np.ones(num_spatial),      # main diagonal
+            np.ones(num_spatial - 1),  # upper diagonal
         ]
 
         spatial_sparse = diags(
@@ -156,11 +155,33 @@ class MacrophageModel:
             format="csr",
         )
 
-        block_dense = np.ones((block_size, block_size), dtype=bool)
+        # 2. Block sparsity (within each spatial node)
+        block_sparse = np.zeros((block_size, block_size), dtype=bool)
 
+        # 2a. Macrophage structural states (m_n): tridiagonal dependence
+        # m_n depends on m_{n-1}, m_n, and m_{n+1}
+        for n in range(N + 1):
+            block_sparse[n, n] = True
+            if n > 0:
+                block_sparse[n, n - 1] = True
+            if n < N:
+                block_sparse[n, n + 1] = True
+
+        # 2b. Macrophage dependence on macroscopic variables
+        # All m_n states depend on LDL (N+1), water (N+2), and HDL (N+3)
+        block_sparse[0:N+1, N+1:N+4] = True
+
+        # 2c. Macroscopic variable dependence on macrophages
+        # The rates of LDL, water, and HDL depend on sums over all m_n states
+        block_sparse[N+1:N+4, 0:N+1] = True
+
+        # 2d. Macroscopic variables depend on each other (and fluid velocity u)
+        block_sparse[N+1:N+4, N+1:N+4] = True
+
+        # 3. Kronecker product to build full Jacobian sparsity
         jac_sparsity = kron(
             spatial_sparse,
-            block_dense,
+            block_sparse,
             format="csr",
         )
 
@@ -302,9 +323,9 @@ class MacrophageModel:
                           * np.sum(self.offloading * m[1:J+1, :], axis=1) + np.sum(m[1:J+1, :] * self.v, axis=1))
         
         # HDL EQUATIONS
-        du[0, N+3] = (J * p.sigma_H - J * u[0] * H[0] - p.alpha * N * p.kminus * H[0] 
+        du[0, N+3] = (J * p.sigma_H - J * u[0] * H[0] - p.alpha * p.delta_v * N * p.kminus * H[0] 
                       * np.sum(self.offloading * m[0, :]) )
-        du[1:J+1, N+3] = (J * (u[0:J] * H[0:J] - u[1:J+1] * H[1:J+1]) - p.alpha * N * p.kminus 
+        du[1:J+1, N+3] = (J * (u[0:J] * H[0:J] - u[1:J+1] * H[1:J+1]) - p.alpha * p.delta_v * N * p.kminus 
                           * H[1:J+1] * np.sum(self.offloading * m[1:J+1, :], axis=1) )
 
 

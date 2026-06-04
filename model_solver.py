@@ -168,7 +168,7 @@ class MacrophageModel:
         du[0, 0] = (
             - N * p.kplus * phi[0] * u[0, 0]
             + p.kminus * u[0, 1]
-            + (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
+            + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
             + M**2 * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
             - p.beta * u[0, 0]
         )

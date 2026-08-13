@@ -9,3 +9,5 @@ Results/
 
 # Parameters file
 params.yaml
+
+critical_point_convergence.ipynb

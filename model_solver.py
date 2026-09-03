@@ -14,7 +14,7 @@ class Params:
     N: int
     kplus: float
     kminus: float
-    beta: float
+    D_max: float
     D_min: float
     gamma: float
     sigma_b: float
@@ -112,10 +112,10 @@ class MacrophageModel:
             du[1:M, 0] = (
                 - N * p.kplus * phi[1:M] * u[1:M, 0]
                 + p.kminus * u[1:M, 1] 
-                + M**2 * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
+                + M**2 * p.D_max * (phi_H[1:M, 0] * (u[0:M-1, 0] + u[2:M+1, 0])
                     - u[1:M, 0] * (phi_H[0:M-1, 0] + phi_H[2:M+1, 0])
                 )
-                - p.beta * u[1:M, 0]
+                - u[1:M, 0]
             )
 
             du[1:M, N] = (
@@ -125,18 +125,18 @@ class MacrophageModel:
                     phi_H[1:M, N] * (u[0:M-1, N] + u[2:M+1, N])
                     - u[1:M, N] * (phi_H[0:M-1, N] + phi_H[2:M+1, N])
                 )
-                - p.beta * u[1:M, N]
+                - u[1:M, N]
             )
 
         if N >= 2:
             n = np.arange(1, N)
-            D_n = p.D_min + (1.0 - p.D_min) * self.n_decay[n]
+            D_n = p.D_min + (p.D_max - p.D_min) * self.n_decay[n]
 
             du[0, 1:N] = (
                 N * p.kplus * phi[0] * (self.n_decay[n - 1] * u[0, 0:N-1] - self.n_decay[n] * u[0, 1:N])
                 + N * p.kminus * (self.n_growth[n + 1] * u[0, 2:N+1] - self.n_growth[n] * u[0, 1:N])
                 + M**2 * D_n * (phi_H[0, 1:N] * u[1, 1:N] - phi_H[1, 1:N] * u[0, 1:N])
-                - p.beta * u[0, 1:N]
+                - u[0, 1:N]
             )
 
             du[M, 1:N] = (
@@ -144,11 +144,11 @@ class MacrophageModel:
                 + N * p.kminus * (self.n_growth[n + 1] * u[M, 2:N+1] - self.n_growth[n] * u[M, 1:N])
                 + M**2 * D_n * (phi_H[M, 1:N] * u[M-1, 1:N] - phi_H[M-1, 1:N] * u[M, 1:N] )
                 - M * p.gamma * D_n * u[M, 1:N]
-                - p.beta * u[M, 1:N]
+                - u[M, 1:N]
             )
 
             if M >= 2:
-                D_n_2d = p.D_min + (1.0 - p.D_min) * self.n_decay[n][None, :]
+                D_n_2d = p.D_min + (p.D_max - p.D_min) * self.n_decay[n][None, :]
                 du[1:M, 1:N] = (
                     N * p.kplus * phi[1:M, None] * (
                         self.n_decay[n - 1][None, :] * u[1:M, 0:N-1]
@@ -162,30 +162,30 @@ class MacrophageModel:
                         phi_H[1:M, 1:N] * (u[0:M-1, 1:N] + u[2:M+1, 1:N])
                         - u[1:M, 1:N] * (phi_H[0:M-1, 1:N] + phi_H[2:M+1, 1:N])
                     )
-                    - p.beta * u[1:M, 1:N]
+                    - u[1:M, 1:N]
                 )
 
         du[0, 0] = (
             - N * p.kplus * phi[0] * u[0, 0]
             + p.kminus * u[0, 1]
             + M * (p.sigma_b + p.sigma_max * VLt / (1.0 + VLt)) * phi_H[0, 0]
-            + M**2 * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
-            - p.beta * u[0, 0]
+            + M**2 * p.D_max * (phi_H[0, 0] * u[1, 0] - phi_H[1, 0] * u[0, 0])
+            - u[0, 0]
         )
 
         du[0, N] = (
             p.kplus * phi[0] * u[0, N-1]
             - N * p.kminus * u[0, N]
             + M**2 * p.D_min * (phi_H[0, N] * u[1, N] - phi_H[1, N] * u[0, N])
-            - p.beta * u[0, N]
+            - u[0, N]
         )
 
         du[M, 0] = (
             - N * p.kplus * phi[M] * u[M, 0]
             + p.kminus * u[M, 1]
-            + M**2 * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
-            - M * p.gamma * u[M, 0]
-            - p.beta * u[M, 0]
+            + M**2 * p.D_max * (phi_H[M, 0] * u[M-1, 0] - phi_H[M-1, 0] * u[M, 0])
+            - M * p.gamma * p.D_max * u[M, 0]
+            - u[M, 0]
         )
 
         du[M, N] = (
@@ -193,7 +193,7 @@ class MacrophageModel:
             - N * p.kminus * u[M, N]
             + M**2 * p.D_min * (phi_H[M, N] * u[M-1, N] - phi_H[M-1, N] * u[M, N])
             - M * p.gamma * p.D_min * u[M, N]
-            - p.beta * u[M, N]
+            - u[M, N]
         )
 
         return du.ravel()
